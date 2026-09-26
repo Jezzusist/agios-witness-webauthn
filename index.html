@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AGIOS Witness WebAuthn</title>
+<style>
+  :root { --bg:#ffffff; --fg:#1b1f23; --muted:#57606a; --line:#d0d7de; --accent:#0969da; --ok:#1a7f37; --err:#cf222e; --card:#f6f8fa; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8d96a0; --line:#30363d; --accent:#4493f8; --ok:#3fb950; --err:#f85149; --card:#161b22; } }
+  body { background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; margin:0; padding:16px; }
+  main { max-width:760px; margin:0 auto; }
+  h1 { font-size:1.4rem; margin:0 0 4px; }
+  p.note { color:var(--muted); margin:0 0 16px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; margin:0 0 16px; }
+  h2 { font-size:1.1rem; margin:0 0 8px; }
+  label { display:block; font-weight:600; margin:8px 0 4px; }
+  input, textarea { width:100%; box-sizing:border-box; font:13px ui-monospace, Consolas, monospace; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); }
+  textarea { min-height:160px; }
+  button { margin-top:12px; padding:8px 16px; border:0; border-radius:6px; background:var(--accent); color:#fff; font-weight:600; cursor:pointer; }
+  .status { margin-top:8px; font-weight:600; }
+  .ok { color:var(--ok); } .err { color:var(--err); }
+</style>
+</head>
+<body>
+<main>
+  <h1>AGIOS witness WebAuthn</h1>
+  <p class="note">Static page, no server, no storage. It asks this device's platform authenticator (Windows Hello) for a passkey with <b>user verification required</b>, and prints the raw WebAuthn outputs so an independent verifier can check them. Nothing leaves this page unless you copy it. RP ID: <code id="rpid"></code>. Origin: <code id="origin"></code>.</p>
+
+  <section>
+    <h2>1. Register the witness credential</h2>
+    <label for="regChallenge">Registration challenge from the verifier (hex or base64url; leave blank for a random test-only challenge)</label>
+    <input id="regChallenge" autocomplete="off" spellcheck="false">
+    <button id="regBtn" type="button">Register with Windows Hello</button>
+    <div id="regStatus" class="status"></div>
+    <label for="regOut">Registration output (copy all of it)</label>
+    <textarea id="regOut" readonly></textarea>
+  </section>
+
+  <section>
+    <h2>2. Sign a verifier challenge (assertion)</h2>
+    <label for="credId">Credential ID from step 1 (base64url)</label>
+    <input id="credId" autocomplete="off" spellcheck="false">
+    <label for="asChallenge">Challenge from the verifier (hex or base64url, single use)</label>
+    <input id="asChallenge" autocomplete="off" spellcheck="false">
+    <button id="asBtn" type="button">Sign with Windows Hello</button>
+    <div id="asStatus" class="status"></div>
+    <label for="asOut">Assertion output (copy all of it)</label>
+    <textarea id="asOut" readonly></textarea>
+  </section>
+</main>
+<script>
+"use strict";
+const RP_ID = location.hostname;
+document.getElementById("rpid").textContent = RP_ID;
+document.getElementById("origin").textContent = location.origin;
+
+function b64url(buf) {
+  const bytes = new Uint8Array(buf);
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function fromB64url(str) {
+  const s = str.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((str.length + 3) % 4);
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+}
+function parseChallenge(text) {
+  const t = text.trim();
+  if (!t) return null;
+  if (/^[0-9a-fA-F]+$/.test(t) && t.length % 2 === 0) {
+    return Uint8Array.from(t.match(/../g).map(h => parseInt(h, 16)));
+  }
+  return fromB64url(t);
+}
+function setStatus(id, ok, msg) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = "status " + (ok ? "ok" : "err");
+}
+
+document.getElementById("regBtn").addEventListener("click", async () => {
+  try {
+    let challenge = parseChallenge(document.getElementById("regChallenge").value);
+    let testOnly = false;
+    if (!challenge) { challenge = crypto.getRandomValues(new Uint8Array(32)); testOnly = true; }
+    if (challenge.length < 16) throw new Error("challenge must be at least 16 bytes");
+    const cred = await navigator.credentials.create({ publicKey: {
+      rp: { id: RP_ID, name: "AGIOS witness" },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: "agios-witness", displayName: "AGIOS witness" },
+      challenge,
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" },
+      attestation: "direct",
+      timeout: 120000
+    }});
+    const r = cred.response;
+    const out = {
+      kind: "webauthn.registration",
+      test_only_challenge: testOnly,
+      rp_id: RP_ID,
+      origin: location.origin,
+      challenge_b64url: b64url(challenge),
+      credential_id_b64url: b64url(cred.rawId),
+      attestation_object_b64url: b64url(r.attestationObject),
+      client_data_json_b64url: b64url(r.clientDataJSON),
+      public_key_spki_b64url: r.getPublicKey ? b64url(r.getPublicKey()) : null,
+      public_key_alg: r.getPublicKeyAlgorithm ? r.getPublicKeyAlgorithm() : null,
+      transports: r.getTransports ? r.getTransports() : null,
+      authenticator_attachment: cred.authenticatorAttachment || null
+    };
+    document.getElementById("regOut").value = JSON.stringify(out, null, 2);
+    document.getElementById("credId").value = out.credential_id_b64url;
+    setStatus("regStatus", true, "Registered. Copy the output above.");
+  } catch (e) {
+    setStatus("regStatus", false, "Registration failed or was cancelled: " + e.name + ": " + e.message);
+  }
+});
+
+document.getElementById("asBtn").addEventListener("click", async () => {
+  try {
+    const credId = document.getElementById("credId").value.trim();
+    const challenge = parseChallenge(document.getElementById("asChallenge").value);
+    if (!credId) throw new Error("credential ID is required");
+    if (!challenge || challenge.length < 16) throw new Error("a verifier challenge of at least 16 bytes is required");
+    const assertion = await navigator.credentials.get({ publicKey: {
+      rpId: RP_ID,
+      challenge,
+      allowCredentials: [{ type: "public-key", id: fromB64url(credId) }],
+      userVerification: "required",
+      timeout: 120000
+    }});
+    const r = assertion.response;
+    const out = {
+      kind: "webauthn.assertion",
+      rp_id: RP_ID,
+      origin: location.origin,
+      challenge_b64url: b64url(challenge),
+      credential_id_b64url: b64url(assertion.rawId),
+      authenticator_data_b64url: b64url(r.authenticatorData),
+      client_data_json_b64url: b64url(r.clientDataJSON),
+      signature_b64url: b64url(r.signature),
+      user_handle_b64url: r.userHandle ? b64url(r.userHandle) : null
+    };
+    document.getElementById("asOut").value = JSON.stringify(out, null, 2);
+    setStatus("asStatus", true, "Signed. Copy the output above.");
+  } catch (e) {
+    setStatus("asStatus", false, "Signing failed or was cancelled: " + e.name + ": " + e.message);
+  }
+});
+</script>
+</body>
+</html>
